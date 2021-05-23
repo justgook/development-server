@@ -1,0 +1,33 @@
+#Logs
+logs
+*.log
+
+#Dependencies
+node_modules/
+elm-stuff/
+
+
+# Yarn Integrity file
+.yarn-integrity
+.yarn/*
+!.yarn/releases
+!.yarn/plugins
+!.yarn/sdks
+!.yarn/versions
+.pnp.*
+
+#Generated tests
+tests/VerifyExamples
+
+
+#OS/IDE stuff
+.DS_Store
+.vscode
+*.iml(
+/.idea
+
+#Other stuff
+documentation.json
+
+#Deployment
+target/

@@ -1,0 +1,4 @@
+bundle.js linguist-generated=true
+examples/* linguist-detectable=false
+*.html linguist-vendored
+*.age filter=lfs diff=lfs merge=lfs -text
