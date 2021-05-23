@@ -80,10 +80,9 @@ const watch = async () => {
     for await (const event of watcher) {
         event.paths.forEach((path) => {
             const value = cache.get(path)
-            if (value) {
+            if (event.kind === "modify" && value) {
                 cache.set(path, { body: value.body, dirty: true })
                 broadcastReload(path)
-                console.log("reload::", path)
             }
         })
     }
@@ -105,6 +104,7 @@ async function handle(conn: Deno.Conn) {
     const jsHeader = new Headers()
     jsHeader.append("Content-Type", "application/javascript")
     const body404 = await fromCache(`${rootDir}/404.html`, Deno.readFile)
+    const indexHtml = await Deno.realPath(`${rootDir}/index.html`)
     for await (const req of Deno.serveHttp(conn)) {
         const t0 = performance.now()
         const url = new URL(req.request.url)
@@ -117,7 +117,7 @@ async function handle(conn: Deno.Conn) {
         let response: Response = new Response("")
         if (url.pathname === "/") {
             try {
-                response = new Response(await fromCache(`${rootDir}/index.html`, Deno.readFile))
+                response = new Response(await fromCache(indexHtml, Deno.readFile))
             } catch (e) {
                 response = new Response(body404, { status: 404 })
             }
