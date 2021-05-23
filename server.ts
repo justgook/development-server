@@ -56,8 +56,7 @@ const transformElm = async (input: string) => {
         stderr: "piped",
         stdout: "piped",
     })
-
-    if (await p.status()) {
+    if ((await p.status()).success) {
         const data = await Deno.readTextFile(outputFile)
         p.close()
         return `
@@ -67,7 +66,12 @@ export const { Elm } = scope;
 `
     } else {
         p.close()
-        return decoder.decode(await p.stderrOutput())
+        // TODO find way how to keep colors
+        const text = decoder.decode(await p.stderrOutput())
+        console.log(`\n`)
+        console.log(text)
+        console.log(`\n`)
+        return `document.body.innerHTML = \`<pre>${text.replaceAll("`","\\`")}</pre>\`;export const Elm = {}`
     }
 
 }
