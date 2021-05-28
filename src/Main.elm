@@ -4,4 +4,4 @@ import Html
 
 
 main =
-    Html.text "hello Main.elm 555"
+    Html.text "hello Main.elm"
