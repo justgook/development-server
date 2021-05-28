@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/evanw/esbuild/pkg/api"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -130,17 +131,25 @@ func transform(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			f, err := ioutil.TempFile("", "output.*.js")
 			if err != nil {
-				log.Println(err.Error())
 				http.Error(w, err.Error(), http.StatusFailedDependency)
 				return
 			}
 			defer os.Remove(f.Name())
-
 			cmd := exec.Command("elm", "make", absP, "--output="+f.Name())
-			err = cmd.Run()
+			stderr, err := cmd.StderrPipe()
 			if err != nil {
-				log.Println(err.Error())
-				http.Error(w, err.Error(), http.StatusFailedDependency)
+				log.Fatal(err)
+			}
+			if err := cmd.Start(); err != nil {
+				log.Fatal(err)
+			}
+			slurp, _ := io.ReadAll(stderr)
+			fmt.Printf("%s\n", slurp)
+
+			if err := cmd.Wait(); err != nil {
+				w.Header().Set("Content-Type", "application/javascript")
+				code = []byte("document.body.innerHTML = `<pre>" + strings.Replace(string(slurp), "`", "\\`", -1) + "</pre>`;export const Elm = {}")
+				w.Write(code)
 				return
 			}
 			content, err := ioutil.ReadFile(f.Name())
