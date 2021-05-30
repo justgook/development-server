@@ -104,10 +104,15 @@ func transform(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch path.Ext(p) {
+	case "":
+		// UGLY fix for typescript imports without extension
+		p += ".ts"
+		absP += ".ts"
+		fallthrough
 	case ".ts":
 		code, ok := fileContent[absP]
 		if !ok {
-			content, err := ioutil.ReadFile(p)
+			content, err := ioutil.ReadFile(absP)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusNotFound)
 				return
@@ -125,7 +130,6 @@ func transform(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/javascript")
 		w.Write(code)
-		return
 	case ".elm":
 		code, ok := fileContent[absP]
 		if !ok {

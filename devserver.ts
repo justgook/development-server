@@ -1,5 +1,6 @@
 import * as esbuild from "https://deno.land/x/esbuild@v0.12.1/mod.js"
 import { serve, Server, Response, ServerRequest, STATUS_TEXT } from "https://deno.land/std@0.97.0/http/mod.ts"
+import * as path from "https://deno.land/std@0.97.0/path/mod.ts";
 
 
 export async function open(url: string): Promise<void> {
@@ -161,8 +162,13 @@ async function handle(server: Server) {
                 response.status = 404
             }
         } else {
+
             try {
-                const realPath = await Deno.realPath(`${rootDir}${url}`)
+                let p = `${rootDir}${url}`
+                if (path.parse(p).ext === ""){
+                    p += ".ts"
+                }
+                const realPath = await Deno.realPath(p)
                 if (realPath.endsWith(".elm")) {
                     response.body = await fromCache(realPath, transformElm)
                     response.headers = jsHeader

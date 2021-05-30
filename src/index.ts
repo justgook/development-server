@@ -1,4 +1,4 @@
-import { hello } from "./delme.ts";
+import { hello } from "./delme";
 
 
 console.log(`${hello} world`);
