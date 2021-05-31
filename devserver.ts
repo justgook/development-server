@@ -56,7 +56,7 @@ export const { Elm } = scope;
 
 }
 
-/* SERER */
+/* SERVER */
 const cache = new Map()
 
 const broadcastMap = new Set<ServerRequest>()
@@ -156,13 +156,13 @@ async function handle(server: Server) {
         let response: Response = { body: "" }
         if (url === "/") {
             try {
+                cache.clear()
                 response.body = await fromCache(indexHtml, Deno.readFile)
             } catch (e) {
                 response.body = body404
                 response.status = 404
             }
         } else {
-
             try {
                 let p = `${rootDir}${url}`
                 if (path.parse(p).ext === ""){
@@ -175,6 +175,8 @@ async function handle(server: Server) {
                 } else if (realPath.endsWith(".ts")) {
                     response.body = await fromCache(realPath, transformTS)
                     response.headers = jsHeader
+                } else {
+                    response.body = await fromCache(realPath, Deno.readFile)
                 }
             } catch (e) {
                 try {

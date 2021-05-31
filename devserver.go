@@ -1,9 +1,11 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"github.com/evanw/esbuild/pkg/api"
+	"github.com/fsnotify/fsnotify"
 	"io"
 	"io/ioutil"
 	"log"
@@ -17,189 +19,226 @@ import (
 	"time"
 )
 
-func openBrowser(url string) {
-	var err error
-	switch runtime.GOOS {
-	case "linux":
-		err = exec.Command("xdg-open", url).Start()
-	case "windows":
-		err = exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
-	case "darwin":
-		err = exec.Command("open", url).Start()
-	default:
-		err = fmt.Errorf("unsupported platform")
-	}
-	if err != nil {
-		log.Fatal(err)
-	}
+type Result struct {
+	Message []byte
+	Error   error
 }
 
-const (
-	// Poll file for changes with this period.
-	filePeriod = 500 * time.Millisecond
-)
+type RequestFile struct {
+	Name     string
+	Response chan Result
+}
+
+type convert func(string) ([]byte, error)
 
 var addr = flag.String("addr", "localhost:8080", "http service address")
 var rootDir = flag.String("dir", "./src", "Set the root directory for the server.")
 
 func main() {
-	openBrowser("http://localhost:8080")
+
 	flag.Parse()
 	log.SetFlags(0)
+	//fmt.Println("parse args:", flag.Args())
 
-	http.HandleFunc("/reload", reloadSSE())
-
-	http.HandleFunc("/", transform)
+	modifiedFile := make(chan string)
+	http.HandleFunc("/reload", reloadSSE(modifiedFile))
+	http.HandleFunc("/", handle(modifiedFile))
 
 	log.Println("Running at", *addr)
+	openBrowser("http://" + *addr)
 	log.Fatal(http.ListenAndServe(*addr, nil))
 }
 
-var fileContent = make(map[string][]byte)
-
-func isFileIfModified(filename string, lastMod time.Time) (bool, time.Time) {
-	fi, err := os.Stat(filename)
+func createWatcher(add chan string, remove chan string, modified chan string) {
+	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		log.Println("isFileIfModified::error", err)
-		return false, lastMod
+		log.Fatal(err)
 	}
-	if !fi.ModTime().After(lastMod) {
-		return false, lastMod
-	}
-	return true, fi.ModTime()
+	defer watcher.Close()
+
+	done := make(chan bool)
+	go func() {
+		for {
+			select {
+			case filename := <-add:
+				log.Println("watch: ", filename)
+				err = watcher.Add(filename)
+				if err != nil {
+					log.Fatal(err)
+				}
+			case filename := <-remove:
+				log.Println("unWatch: ", filename)
+				err = watcher.Remove(filename)
+				if err != nil {
+					log.Fatal(err)
+				}
+			case event, ok := <-watcher.Events:
+				if !ok {
+					return
+				}
+				log.Println("event:", event)
+				if event.Op&fsnotify.Write == fsnotify.Write {
+					log.Println("modified file:", event.Name)
+					modified <- event.Name
+				}
+			case err, ok := <-watcher.Errors:
+				if !ok {
+					return
+				}
+				log.Println("error:", err)
+			}
+		}
+	}()
+	<-done
 }
 
-func watcher(filename string, lastMod time.Time) {
-	fileTicker := time.NewTicker(filePeriod)
-	defer func() {
-		fileTicker.Stop()
-	}()
+func handle(modifiedFile chan string) http.HandlerFunc {
+	log.Println("handle handle handle handle handle")
+	staticFilesCn := make(chan RequestFile)
+	tsFilesCn := make(chan RequestFile)
+	elmFilesCn := make(chan RequestFile)
+	watchFile := make(chan string)
+	unwatchFile := make(chan string)
+
+	done := make(chan struct{})
+	go cacheRead(ioutil.ReadFile, staticFilesCn, done)
+	go cacheRead(TransformTypeScript, tsFilesCn, done)
+	go cacheRead(TransformElm, elmFilesCn, done)
+	go createWatcher(watchFile, unwatchFile, modifiedFile)
+	// TODO move function outside ?
+	convertFile := func(cn chan RequestFile, p string) ([]byte, error) {
+		timeout := make(chan bool, 1)
+		go func() {
+			time.Sleep(2 * time.Second)
+			timeout <- true
+		}()
+		response := RequestFile{p, make(chan Result)}
+		cn <- response
+		select {
+		case result := <-response.Response:
+			close(response.Response)
+			if result.Error != nil {
+				return nil, result.Error
+			}
+			return result.Message, nil
+		case <-timeout:
+			return nil, errors.New("file converting timeout")
+		}
+
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		var code []byte
+		p := path.Join("./", *rootDir, r.URL.Path)
+		if p == path.Clean(*rootDir) {
+			p += "/index.html"
+		}
+		p, err := filepath.Abs(p)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		switch path.Ext(p) {
+		case "":
+			// UGLY fix for typescript imports without extension
+			p += ".ts"
+			fallthrough
+		case ".ts":
+			code, err = convertFile(tsFilesCn, p)
+			w.Header().Set("Content-Type", "application/javascript")
+		case ".elm":
+			code, err = convertFile(elmFilesCn, p)
+			// TODO add dependencies watch https://github.com/NoRedInk/find-elm-dependencies
+			//watchFile <- p
+			w.Header().Set("Content-Type", "application/javascript")
+		default:
+			code, err = convertFile(staticFilesCn, p)
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		watchFile <- p
+		w.Write(code)
+	}
+}
+
+func cacheRead(transform convert, r chan RequestFile, done chan struct{}) {
+	var fileContent = make(map[string][]byte)
 	for {
 		select {
-		case <-fileTicker.C:
-			var isMod bool
-			isMod, lastMod = isFileIfModified(filename, lastMod)
-			if _, ok := fileContent[filename]; isMod || !ok {
-				delete(fileContent, filename)
-				sendFilename(filename)
-				log.Println("File changed:" + filename)
-				return
+		case msg1 := <-r:
+			p := msg1.Name
+			content, ok := fileContent[p]
+			var err error
+			if !ok {
+				content, err = transform(p)
 			}
+			msg1.Response <- Result{content, err}
+		case <-done:
+			return
 		}
 	}
 }
-
-func transform(w http.ResponseWriter, r *http.Request) {
-	p := path.Join("./", *rootDir, r.URL.Path)
-	clean := false
-
-	if p == path.Clean(*rootDir) {
-		p += "/index.html"
-		clean = true
-	}
-	log.Println("Serving:", p)
-	absP, err := filepath.Abs(p)
+func TransformTypeScript(p string) ([]byte, error) {
+	content, err := ioutil.ReadFile(p)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
-		return
+		return nil, err
 	}
-	switch path.Ext(p) {
-	case "":
-		// UGLY fix for typescript imports without extension
-		p += ".ts"
-		absP += ".ts"
-		fallthrough
-	case ".ts":
-		code, ok := fileContent[absP]
-		if !ok {
-			content, err := ioutil.ReadFile(absP)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusNotFound)
-				return
-			}
-			result := api.Transform(string(content), api.TransformOptions{
-				Loader: api.LoaderTS,
-			})
-			if len(result.Errors) > 0 {
-				http.Error(w, "esbuild fail Transform", http.StatusFailedDependency)
-				return
-			}
-			code = result.Code
-			fileContent[absP] = code
-			go watcher(absP, time.Now())
-		}
-		w.Header().Set("Content-Type", "application/javascript")
-		w.Write(code)
-	case ".elm":
-		code, ok := fileContent[absP]
-		if !ok {
-			f, err := ioutil.TempFile("", "output.*.js")
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusFailedDependency)
-				return
-			}
-			defer os.Remove(f.Name())
-			cmd := exec.Command("elm", "make", absP, "--output="+f.Name())
-			stderr, err := cmd.StderrPipe()
-			if err != nil {
-				log.Fatal(err)
-			}
-			if err := cmd.Start(); err != nil {
-				log.Fatal(err)
-			}
-			slurp, _ := io.ReadAll(stderr)
-			fmt.Printf("%s\n", slurp)
+	result := api.Transform(string(content), api.TransformOptions{
+		Loader: api.LoaderTS,
+	})
+	if len(result.Errors) > 0 {
+		return nil, errors.New("esbuild Got errors")
+	}
 
-			if err := cmd.Wait(); err != nil {
-				w.Header().Set("Content-Type", "application/javascript")
-				code = []byte("document.body.innerHTML = `<pre>" + strings.Replace(string(slurp), "`", "\\`", -1) + "</pre>`;export const Elm = {}")
-				w.Write(code)
-				return
-			}
-			content, err := ioutil.ReadFile(f.Name())
-			result :=
-				`const scope = {};
-` + strings.Replace(string(content), "}(this));", "}(scope));", 1) + `
-export const { Elm } = scope;`
-			code = []byte(result)
-			fileContent[absP] = code
-			go watcher(absP, time.Now())
-		}
-		w.Header().Set("Content-Type", "application/javascript")
-		w.Write(code)
-	default:
-		code, ok := fileContent[absP]
-		if !ok {
-			code, err = ioutil.ReadFile(absP)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusNotFound)
-				return
-			}
-			fileContent[absP] = code
-			go watcher(absP, time.Now())
-		}
-		if clean {
-			for k := range fileContent {
-				if k != absP {
-					delete(fileContent, k)
-				}
-			}
-		}
-		w.Write(code)
+	return result.Code, nil
+}
+
+func TransformElm(p string) ([]byte, error) {
+	f, err := ioutil.TempFile("", "output.*.js")
+	if err != nil {
+		return nil, err
 	}
+	defer os.Remove(f.Name())
+	cmd := exec.Command("elm", "make", p, "--output="+f.Name())
+
+	stderr, err := cmd.StderrPipe()
+	if _, err2 := cmd.StdoutPipe(); err != nil || err2 != nil {
+		return nil, err
+	}
+
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	slurp, _ := io.ReadAll(stderr)
+	if len(slurp) > 0 {
+		fmt.Printf("%s\n", slurp)
+		return []byte("document.body.innerHTML = `<pre>" + strings.Replace(string(slurp), "`", "\\`", -1) + "</pre>`;export const Elm = {}"), err
+	}
+
+	if err := cmd.Wait(); err != nil {
+		return nil, err
+	}
+	content, err := ioutil.ReadFile(f.Name())
+	if err != nil {
+		return nil, err
+	}
+	return []byte(`const scope = {};` + strings.Replace(string(content), "}(this));", "}(scope));", 1) + `export const { Elm } = scope;`), nil
 }
 
 //https://dev.to/mirzaakhena/server-sent-events-sse-server-implementation-with-go-4ck2
-
-func sendFilename(message string) {
-	for messageChannel := range messageChannels {
-		messageChannel <- []byte(message)
-	}
-}
-
-var messageChannels = make(map[chan []byte]bool)
-
-func reloadSSE() http.HandlerFunc {
+func reloadSSE(modifiedFile chan string) http.HandlerFunc {
+	messageChannels := make(map[chan []byte]bool)
+	go func() {
+		for {
+			select {
+			case message := <-modifiedFile:
+				for messageChannel := range messageChannels {
+					messageChannel <- []byte(message)
+				}
+			}
+		}
+	}()
 	return func(w http.ResponseWriter, r *http.Request) {
 		// prepare the header
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -207,6 +246,7 @@ func reloadSSE() http.HandlerFunc {
 		w.Header().Set("Connection", "keep-alive")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		_messageChannel := make(chan []byte)
+		// TODO Fix potential race
 		messageChannels[_messageChannel] = true
 		// prepare the flusher
 		flusher, _ := w.(http.Flusher)
@@ -223,5 +263,22 @@ func reloadSSE() http.HandlerFunc {
 				return
 			}
 		}
+	}
+}
+
+func openBrowser(url string) {
+	var err error
+	switch runtime.GOOS {
+	case "linux":
+		err = exec.Command("xdg-open", url).Start()
+	case "windows":
+		err = exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+	case "darwin":
+		err = exec.Command("open", url).Start()
+	default:
+		err = fmt.Errorf("unsupported platform")
+	}
+	if err != nil {
+		log.Fatal(err)
 	}
 }
