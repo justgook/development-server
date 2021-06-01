@@ -35,7 +35,7 @@ var addr = flag.String("addr", "localhost:8080", "http service address")
 var rootDir = flag.String("dir", "./src", "Set the root directory for the server.")
 
 func main() {
-
+	//var srv http.Server
 	flag.Parse()
 	log.SetFlags(0)
 	//fmt.Println("parse args:", flag.Args())
@@ -49,7 +49,7 @@ func main() {
 	log.Fatal(http.ListenAndServe(*addr, nil))
 }
 
-func createWatcher(add chan string, remove chan string, modified chan string) {
+func createWatcher(add <-chan string, remove <-chan string, modified chan<- string) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		log.Fatal(err)
@@ -90,9 +90,10 @@ func createWatcher(add chan string, remove chan string, modified chan string) {
 		}
 	}()
 	<-done
+	log.Println("Watcher Stop")
 }
 
-func handle(modifiedFile chan string) http.HandlerFunc {
+func handle(modifiedFile chan<- string) http.HandlerFunc {
 	log.Println("handle handle handle handle handle")
 	staticFilesCn := make(chan RequestFile)
 	tsFilesCn := make(chan RequestFile)
@@ -105,27 +106,7 @@ func handle(modifiedFile chan string) http.HandlerFunc {
 	go cacheRead(TransformTypeScript, tsFilesCn, done)
 	go cacheRead(TransformElm, elmFilesCn, done)
 	go createWatcher(watchFile, unwatchFile, modifiedFile)
-	// TODO move function outside ?
-	convertFile := func(cn chan RequestFile, p string) ([]byte, error) {
-		timeout := make(chan bool, 1)
-		go func() {
-			time.Sleep(2 * time.Second)
-			timeout <- true
-		}()
-		response := RequestFile{p, make(chan Result)}
-		cn <- response
-		select {
-		case result := <-response.Response:
-			close(response.Response)
-			if result.Error != nil {
-				return nil, result.Error
-			}
-			return result.Message, nil
-		case <-timeout:
-			return nil, errors.New("file converting timeout")
-		}
 
-	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		var code []byte
 		p := path.Join("./", *rootDir, r.URL.Path)
@@ -157,8 +138,31 @@ func handle(modifiedFile chan string) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		watchFile <- p
+		select {
+		case watchFile <- p:
+		default:
+			fmt.Println("File watcher is dead")
+		}
 		w.Write(code)
+	}
+}
+func convertFile(cn chan RequestFile, p string) ([]byte, error) {
+	timeout := make(chan bool, 1)
+	go func() {
+		time.Sleep(2 * time.Second)
+		timeout <- true
+	}()
+	response := RequestFile{p, make(chan Result)}
+	cn <- response
+	select {
+	case result := <-response.Response:
+		close(response.Response)
+		if result.Error != nil {
+			return nil, result.Error
+		}
+		return result.Message, nil
+	case <-timeout:
+		return nil, errors.New("file converting timeout")
 	}
 }
 
@@ -227,15 +231,19 @@ func TransformElm(p string) ([]byte, error) {
 }
 
 //https://dev.to/mirzaakhena/server-sent-events-sse-server-implementation-with-go-4ck2
-func reloadSSE(modifiedFile chan string) http.HandlerFunc {
-	messageChannels := make(map[chan []byte]bool)
+func reloadSSE(broadcast <-chan string) http.HandlerFunc {
+	channels := make(map[chan []byte]bool)
+	channelsAdd := make(chan chan []byte)
+
 	go func() {
 		for {
 			select {
-			case message := <-modifiedFile:
-				for messageChannel := range messageChannels {
-					messageChannel <- []byte(message)
+			case message := <-broadcast:
+				for channel := range channels {
+					channel <- []byte(message)
 				}
+			case channel := <-channelsAdd:
+				channels[channel] = true
 			}
 		}
 	}()
@@ -245,21 +253,22 @@ func reloadSSE(modifiedFile chan string) http.HandlerFunc {
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		_messageChannel := make(chan []byte)
-		// TODO Fix potential race
-		messageChannels[_messageChannel] = true
+
+		channel := make(chan []byte)
+		channelsAdd <- channel
 		// prepare the flusher
 		flusher, _ := w.(http.Flusher)
 		// trap the request under loop forever
 		for {
 			select {
 			// message will received here and printed
-			case message := <-_messageChannel:
+			case message := <-channel:
 				fmt.Fprintf(w, "data:%s\n\n", message)
 				flusher.Flush()
 			// connection is closed then defer will be executed
 			case <-r.Context().Done():
-				delete(messageChannels, _messageChannel)
+				delete(channels, channel)
+				close(channel)
 				return
 			}
 		}
