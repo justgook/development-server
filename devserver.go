@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -61,7 +62,6 @@ func createWatcher(add <-chan string, remove <-chan string, modified chan<- stri
 		for {
 			select {
 			case filename := <-add:
-				log.Println("watch: ", filename)
 				err = watcher.Add(filename)
 				if err != nil {
 					log.Fatal(err)
@@ -77,7 +77,9 @@ func createWatcher(add <-chan string, remove <-chan string, modified chan<- stri
 					return
 				}
 				log.Println("event:", event)
-				if event.Op&fsnotify.Write == fsnotify.Write {
+				if event.Op == fsnotify.Remove || event.Op == fsnotify.Rename {
+					modified <- event.Name
+				} else if event.Op&fsnotify.Write == fsnotify.Write {
 					log.Println("modified file:", event.Name)
 					modified <- event.Name
 				}
@@ -93,8 +95,14 @@ func createWatcher(add <-chan string, remove <-chan string, modified chan<- stri
 	log.Println("Watcher Stop")
 }
 
+func track(msg string) (string, time.Time) {
+	return msg, time.Now()
+}
+
+func duration(msg string, start time.Time) {
+	log.Printf("%v: %v\n", msg, time.Since(start).Round(time.Millisecond))
+}
 func handle(modifiedFile chan<- string) http.HandlerFunc {
-	log.Println("handle handle handle handle handle")
 	staticFilesCn := make(chan RequestFile)
 	tsFilesCn := make(chan RequestFile)
 	elmFilesCn := make(chan RequestFile)
@@ -108,6 +116,7 @@ func handle(modifiedFile chan<- string) http.HandlerFunc {
 	go createWatcher(watchFile, unwatchFile, modifiedFile)
 
 	return func(w http.ResponseWriter, r *http.Request) {
+
 		var code []byte
 		p := path.Join("./", *rootDir, r.URL.Path)
 		if p == path.Clean(*rootDir) {
@@ -118,6 +127,7 @@ func handle(modifiedFile chan<- string) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
+		defer duration(track(p))
 		switch path.Ext(p) {
 		case "":
 			// UGLY fix for typescript imports without extension
@@ -128,8 +138,23 @@ func handle(modifiedFile chan<- string) http.HandlerFunc {
 			w.Header().Set("Content-Type", "application/javascript")
 		case ".elm":
 			code, err = convertFile(elmFilesCn, p)
-			// TODO add dependencies watch https://github.com/NoRedInk/find-elm-dependencies
-			//watchFile <- p
+			go func() {
+				// TODO rewrite to go https://github.com/NoRedInk/find-elm-dependencies
+				cmd, b := exec.Command("find-elm-dependencies", p), new(strings.Builder)
+				cmd.Stdout = b
+				if err := cmd.Run(); err != nil {
+					log.Println(err)
+				}
+				r := regexp.MustCompile(`'(.+)'`)
+				matches := r.FindAllString(b.String(), -1)
+				for _, element := range matches {
+					select {
+					case watchFile <- strings.Replace(element, "'", "", -1):
+					default:
+						fmt.Println("File watcher is dead")
+					}
+				}
+			}()
 			w.Header().Set("Content-Type", "application/javascript")
 		default:
 			code, err = convertFile(staticFilesCn, p)
@@ -146,6 +171,7 @@ func handle(modifiedFile chan<- string) http.HandlerFunc {
 		w.Write(code)
 	}
 }
+
 func convertFile(cn chan RequestFile, p string) ([]byte, error) {
 	timeout := make(chan bool, 1)
 	go func() {

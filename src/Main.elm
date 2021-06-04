@@ -1,7 +1,8 @@
 module Main exposing (main)
 
+import Dep exposing (helloWorld)
 import Html
 
 
 main =
-    Html.text "hello Main.elm"
+    Html.text helloWorld
