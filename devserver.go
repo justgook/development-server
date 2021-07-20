@@ -147,11 +147,15 @@ func handle(modifiedFile chan<- string) http.HandlerFunc {
 				}
 				r := regexp.MustCompile(`'(.+)'`)
 				matches := r.FindAllString(b.String(), -1)
-				for _, element := range matches {
+
+				for _, filename := range matches {
+					//start := time.Now()
 					select {
-					case watchFile <- strings.Replace(element, "'", "", -1):
-					default:
-						fmt.Println("File watcher is dead")
+					case watchFile <- strings.Replace(filename, "'", "", -1):
+						//duration := time.Since(start)
+						//fmt.Println("start watching", filename, duration)
+					case <-time.After(2 * time.Second):
+						fmt.Println("File watcher timeout")
 					}
 				}
 			}()
@@ -166,18 +170,13 @@ func handle(modifiedFile chan<- string) http.HandlerFunc {
 		select {
 		case watchFile <- p:
 		default:
-			fmt.Println("File watcher is dead")
+			fmt.Println("File watcher is dead 2")
 		}
 		w.Write(code)
 	}
 }
 
 func convertFile(cn chan RequestFile, p string) ([]byte, error) {
-	timeout := make(chan bool, 1)
-	go func() {
-		time.Sleep(2 * time.Second)
-		timeout <- true
-	}()
 	response := RequestFile{p, make(chan Result)}
 	cn <- response
 	select {
@@ -187,7 +186,7 @@ func convertFile(cn chan RequestFile, p string) ([]byte, error) {
 			return nil, result.Error
 		}
 		return result.Message, nil
-	case <-timeout:
+	case <-time.After(2 * time.Second):
 		return nil, errors.New("file converting timeout")
 	}
 }
